@@ -480,32 +480,58 @@ TARGET_OUTPUT_CHANNELS = int(os.environ.get('AV_STUDY_OUTPUT_CHANNELS', '2'))
 PTB_PREFLIGHT_LEAD_SEC = float(os.environ.get('AV_STUDY_PTB_PREFLIGHT_LEAD_SEC', '0.5'))
 
 
-def _detect_ptb_preflight_supported():
-    """Return True if the active Sound backend is PTB and accepts play(when=...)."""
-    active = getattr(sound, 'audioLib', None)
-    if active != 'ptb':
-        return False
+PTB_PREFLIGHT_SUPPORTED = False
+
+
+def _detect_ptb_preflight_supported(sample_sound=None):
+    """Return (supported, diagnostic_string).
+
+    PsychoPy 2026.x doesn't reliably set the module-level ``sound.audioLib``,
+    so we inspect a real preloaded Sound instance instead. PTB-backed sounds
+    live in ``psychopy.sound.backend_ptb`` and expose ``play(when=...)``.
+    """
+    import inspect
+
+    if sample_sound is None:
+        return False, "no sample sound provided"
+
+    cls = type(sample_sound)
+    module = getattr(cls, '__module__', '') or ''
+    is_ptb = 'backend_ptb' in module or module.endswith('.SoundPTB')
+
+    play = getattr(sample_sound, 'play', None)
+    if play is None:
+        return False, f"sound class {module}.{cls.__name__} has no play()"
+
     try:
-        import inspect
-        from psychopy.sound.backend_ptb import Sound as PTBSound
-    except Exception:
-        return False
-    try:
-        sig = inspect.signature(PTBSound.play)
+        sig = inspect.signature(play)
     except (TypeError, ValueError):
-        return False
-    return 'when' in sig.parameters
+        return False, f"could not introspect play() of {module}.{cls.__name__}"
+
+    accepts_when = 'when' in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+    diagnostic = (
+        f"sound class={module}.{cls.__name__} "
+        f"accepts_when={accepts_when} "
+        f"sound.audioLib={getattr(sound, 'audioLib', None)!r}"
+    )
+    return (is_ptb and accepts_when), diagnostic
 
 
-PTB_PREFLIGHT_SUPPORTED = _detect_ptb_preflight_supported()
-if PTB_PREFLIGHT_SUPPORTED:
-    print(f"PTB preflight scheduling enabled "
-          f"(audioLib={getattr(sound, 'audioLib', None)!r}, "
-          f"lead {PTB_PREFLIGHT_LEAD_SEC:.3f}s).")
-else:
-    print(f"PTB preflight scheduling not available "
-          f"(audioLib={getattr(sound, 'audioLib', None)!r}); "
-          f"using post-flip play().")
+def _refresh_ptb_preflight_status(sample_sound=None):
+    """Re-probe and announce PTB preflight support. Call after preload."""
+    global PTB_PREFLIGHT_SUPPORTED
+    supported, diag = _detect_ptb_preflight_supported(sample_sound=sample_sound)
+    PTB_PREFLIGHT_SUPPORTED = supported
+    if PTB_PREFLIGHT_SUPPORTED:
+        print(f"PTB preflight scheduling enabled "
+              f"(lead {PTB_PREFLIGHT_LEAD_SEC:.3f}s, {diag}).")
+    else:
+        print(f"PTB preflight scheduling not available; "
+              f"using post-flip play(). [{diag}]")
+    return PTB_PREFLIGHT_SUPPORTED
 
 
 def _patch_ptb_channel_count():
@@ -665,6 +691,8 @@ def preload_stimulus_resources():
 
 
 IMAGE_STIM_CACHE, SOUND_PATH_CACHE, SOUND_STIM_CACHE = preload_stimulus_resources()
+_sample_sound_for_probe = next(iter(SOUND_STIM_CACHE.values()), None) if SOUND_STIM_CACHE else None
+_refresh_ptb_preflight_status(sample_sound=_sample_sound_for_probe)
 
 
 def print_audio_runtime_summary():
