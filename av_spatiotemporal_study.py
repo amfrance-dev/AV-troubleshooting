@@ -24,52 +24,48 @@
 
 import os
 import sys
-
-# 1. WAYLAND GUARD (CRITICAL for AV Sync)
-if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
-    raise RuntimeError(
-        "CRITICAL: Wayland session detected. PsychoPy requires bare-metal VBLANK access. "
-        "Log out, click the gear icon on the GDM login screen, select 'Ubuntu on Xorg', "
-        "and log back in before running this experiment."
-    )
-
-# 2. IMPORT PREFS FIRST
 from psychopy import prefs
 
-# 3. SET AUDIO ENGINE PREFERENCES
-# Prioritizing 'ptb' (PsychToolbox) for sub-millisecond timing.
-# audioSpeaker must be set to 'default' to fix the DeviceNotConnectedError.
-prefs.hardware['audioLib'] = ['sounddevice', 'ptb']
-prefs.hardware['audioLatencyMode'] = [3]  
-prefs.hardware['audioSpeaker'] = ['default']
+# 1. SESSION GUARD (strict mode optional)
+STRICT_XORG = os.environ.get('AV_STUDY_STRICT_XORG', '0') == '1'
+if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+    if STRICT_XORG:
+        raise RuntimeError("Wayland detected. Switch to Xorg or set AV_STUDY_STRICT_XORG=0.")
+    print("WARNING: Wayland session detected. Xorg is recommended for timing-critical runs.")
 
-# 4. RESOLVE AND PIN HARDWARE
-# We use 'default' because your hardware scan marked it as the primary active ALSA bridge.
-try:
-    import sounddevice as _sd
-    _devs = _sd.query_devices()
-    
-    # On your system, 'default' (Index 14) is the confirmed PipeWire/Pulse bridge.
-    # We pin it as a list to satisfy the 2025 hardware manager.
-    prefs.hardware['audioDevice'] = ['default']
-    print("[AUDIO] Hardware Sync: Pinned to 'default' bridge")
-            
-except Exception as _e:
-    print(f"[AUDIO] Could not pin hardware: {_e} — using system defaults")
+# 2. AUDIO PREFERENCES
+DEFAULT_AUDIO_LIB_ORDER = ['ptb', 'sounddevice', 'pygame']
+audio_lib_env = os.environ.get('AV_STUDY_AUDIO_LIBS', '')
+audio_lib_order = [x.strip() for x in audio_lib_env.split(',') if x.strip()] if audio_lib_env else DEFAULT_AUDIO_LIB_ORDER
+audio_latency_mode = int(os.environ.get('AV_STUDY_AUDIO_LATENCY_MODE', '2'))
+audio_device_name = os.environ.get('AV_STUDY_AUDIO_DEVICE', 'default')
+audio_speaker_name = os.environ.get('AV_STUDY_AUDIO_SPEAKER', audio_device_name)
 
+prefs.hardware['audioLib'] = audio_lib_order
+prefs.hardware['audioLatencyMode'] = [audio_latency_mode]
+prefs.hardware['audioDevice'] = [audio_device_name]
+prefs.hardware['audioSpeaker'] = [audio_speaker_name]
 
+# 3. FORCE LOCAL WORKING DIRECTORY
+# AV_STUDY_DIR override can point at lab SMB/local mirror. Default is script dir.
+STUDY_DIR = os.environ.get('AV_STUDY_DIR', os.path.dirname(os.path.abspath(__file__)))
+if not os.path.exists(STUDY_DIR):
+    raise RuntimeError(f"Study directory does not exist: {STUDY_DIR}")
+os.chdir(STUDY_DIR)
+print(f"Working directory: {STUDY_DIR}")
 
-# 4. IMMEDIATELY import the sound module to lock in ALL preferences
+# 4. LOCK IN PREFERENCES
 from psychopy import sound
 
 # 5. Now import everything else
 import numpy as np
 import random
+from psychopy import visual, core, event, logging
+from psychopy.hardware import keyboard
 import csv
 from datetime import datetime
 from PIL import Image
-from psychopy import visual, core, event, logging
-from psychopy.hardware import keyboard
+
 
 try:
     from pydub import AudioSegment
@@ -85,19 +81,7 @@ except ImportError:
 # ==============================================================================
 
 # --- File paths ---
-STUDY_DIR = '/run/user/{uid}/gvfs/smb-share:server=psyc-files.ucsc.edu,share=jamal/Experiments/Anthony/AudioVisualSpatiotemporalStudy-codex-sanji-runtime-bundle'.format(
-    uid=os.getuid() if hasattr(os, 'getuid') else 1000
-)
-if not os.path.exists(STUDY_DIR):
-    print(f"WARNING: SMB mount not found at {STUDY_DIR}, trying local Desktop fallback...")
-    STUDY_DIR = os.path.expanduser('~/Desktop/AV_Study')
-    if not os.path.exists(STUDY_DIR):
-        print(f"WARNING: ~/Desktop/AV_Study not found, trying script directory...")
-        STUDY_DIR = os.path.dirname(os.path.abspath(__file__))
-        print(f"Using script directory: {STUDY_DIR}")
-
-os.chdir(STUDY_DIR)
-print(f"Working directory: {STUDY_DIR}")
+# Resolved once at startup above via AV_STUDY_DIR or script directory.
 
 # --- Privileged target selection ---
 PT_COUNT_PER_GROUP = 2      
@@ -151,11 +135,15 @@ BETWEEN_PT_STIMULUS_GAP = 1.0
 SOUND_DUR     = 1.0     
 MIN_AUDIO_GAP = 0.2     
 TARGET_DBFS   = -20.0   
-PREFER_CLEANED_AUDIO = True
+PREFER_CLEANED_AUDIO = os.environ.get('AV_STUDY_PREFER_CLEANED_AUDIO', '1') == '1'
 CLEANED_AUDIO_SUBDIR = '_cleaned'
 CANONICAL_AUDIO_HZ = 48000
 CANONICAL_AUDIO_CHANNELS = 2
 CANONICAL_AUDIO_SAMPLE_WIDTH_BYTES = 2
+MAX_AUDIO_PRELOAD_FAILURES = int(os.environ.get('AV_STUDY_MAX_AUDIO_PRELOAD_FAILURES', '0'))
+MAX_AUDIO_RUNTIME_FAILURES = int(os.environ.get('AV_STUDY_MAX_AUDIO_RUNTIME_FAILURES', '2'))
+SKIP_AUDIO_PREFLIGHT = os.environ.get('AV_STUDY_SKIP_AUDIO_PREFLIGHT', '0') == '1'
+AUDIO_RUNTIME_FAILURES = 0
 
 # --- Response ---
 RESPONSE_WINDOW = 1.5   
@@ -175,9 +163,10 @@ IMAGE_SIZE  = [200, 200]  # Reduced by 50%
 MAX_OPACITY = 1.0
 
 # --- Debug overlay ---
-# Set to True to show quadrant dividing lines and corner dots during trials.
-# Flip to False before real data collection.
-DEBUG_OVERLAY = True
+# Off by default for production timing. Set AV_STUDY_DEBUG_OVERLAY=1 to enable
+# during layout/dev passes (adds per-frame text/line/dot draws that worsen
+# frame timing).
+DEBUG_OVERLAY = os.environ.get('AV_STUDY_DEBUG_OVERLAY', '0') == '1'
 
 # --- Numpad mapping (Linux Safe) ---
 CORNER_TO_KEY = {
@@ -486,6 +475,132 @@ def load_background():
 noise_stims = load_background()
 
 
+SHARED_SPEAKER = None
+TARGET_OUTPUT_CHANNELS = int(os.environ.get('AV_STUDY_OUTPUT_CHANNELS', '2'))
+PTB_PREFLIGHT_LEAD_SEC = float(os.environ.get('AV_STUDY_PTB_PREFLIGHT_LEAD_SEC', '0.5'))
+
+
+def _detect_ptb_preflight_supported():
+    """Return True if the active Sound backend is PTB and accepts play(when=...)."""
+    active = getattr(sound, 'audioLib', None)
+    if active != 'ptb':
+        return False
+    try:
+        import inspect
+        from psychopy.sound.backend_ptb import Sound as PTBSound
+    except Exception:
+        return False
+    try:
+        sig = inspect.signature(PTBSound.play)
+    except (TypeError, ValueError):
+        return False
+    return 'when' in sig.parameters
+
+
+PTB_PREFLIGHT_SUPPORTED = _detect_ptb_preflight_supported()
+if PTB_PREFLIGHT_SUPPORTED:
+    print(f"PTB preflight scheduling enabled "
+          f"(audioLib={getattr(sound, 'audioLib', None)!r}, "
+          f"lead {PTB_PREFLIGHT_LEAD_SEC:.3f}s).")
+else:
+    print(f"PTB preflight scheduling not available "
+          f"(audioLib={getattr(sound, 'audioLib', None)!r}); "
+          f"using post-flip play().")
+
+
+def _patch_ptb_channel_count():
+    """Clamp PortAudio device NrOutputChannels to TARGET_OUTPUT_CHANNELS.
+
+    PipeWire/PulseAudio often reports virtual devices with 128 output channels.
+    PsychoPy opens streams with that count, then can't fill a 2-channel WAV.
+    Pulse handles channel up-mix internally, so opening at stereo is safe.
+    """
+    try:
+        import psychtoolbox.audio as ptb_audio
+    except Exception as e:
+        print(f"  WARNING: could not import psychtoolbox.audio for channel patch: {e}")
+        return
+
+    if getattr(ptb_audio.get_devices, '_av_study_patched', False):
+        return
+
+    _orig = ptb_audio.get_devices
+
+    def _patched(*args, **kwargs):
+        devs = _orig(*args, **kwargs)
+        for d in devs:
+            try:
+                n = float(d.get('NrOutputChannels', 0))
+            except Exception:
+                continue
+            if n > TARGET_OUTPUT_CHANNELS:
+                d['NrOutputChannels'] = float(TARGET_OUTPUT_CHANNELS)
+        return devs
+
+    _patched._av_study_patched = True
+    ptb_audio.get_devices = _patched
+    print(f"  Patched psychtoolbox.audio.get_devices to clamp output channels to "
+          f"{TARGET_OUTPUT_CHANNELS}.")
+
+
+def _resolve_shared_speaker():
+    """Construct one SpeakerDevice and reuse it for all Sound() calls.
+
+    Bypasses PsychoPy 2026's prefs-based default-device path, which can crash
+    when getAvailableDevices() returns an empty list (e.g., misconfigured
+    Linux PortAudio/ALSA bridge).
+    """
+    global SHARED_SPEAKER
+    if SHARED_SPEAKER is not None:
+        return SHARED_SPEAKER
+
+    _patch_ptb_channel_count()
+
+    try:
+        from psychopy.hardware.speaker import SpeakerDevice
+    except Exception as e:
+        print(f"  WARNING: could not import SpeakerDevice: {e}")
+        return None
+
+    try:
+        available = SpeakerDevice.getAvailableDevices()
+    except Exception as e:
+        print(f"  WARNING: SpeakerDevice.getAvailableDevices() failed: {e}")
+        available = []
+
+    print(f"  Available speakers (filtered): {[d.get('deviceName') for d in available]}")
+
+    if not available:
+        print("  WARNING: no audio output devices visible to PsychoPy. "
+              "Sound() calls will fall back to PsychoPy's default-device path.")
+        return None
+
+    requested = audio_speaker_name
+    chosen = None
+    for d in available:
+        if d.get('deviceName') == requested:
+            chosen = d
+            break
+    if chosen is None:
+        chosen = available[0]
+        print(f"  NOTE: requested speaker '{requested}' not found; using "
+              f"'{chosen.get('deviceName')}' instead.")
+
+    try:
+        SHARED_SPEAKER = SpeakerDevice(
+            name=chosen.get('deviceName'),
+            latencyClass=audio_latency_mode,
+        )
+        print(f"  Bound shared speaker: name='{SHARED_SPEAKER.name}' "
+              f"index={SHARED_SPEAKER.index} latencyClass={audio_latency_mode}")
+    except Exception as e:
+        print(f"  WARNING: SpeakerDevice construction failed for "
+              f"'{chosen.get('deviceName')}': {type(e).__name__}: {e}")
+        SHARED_SPEAKER = None
+
+    return SHARED_SPEAKER
+
+
 def preload_stimulus_resources():
     """Load visual and audio assets once so trial building stays lightweight.
 
@@ -496,6 +611,9 @@ def preload_stimulus_resources():
     image_cache = {}
     sound_path_cache = {}
     sound_stim_cache = {}
+    failed_sound_items = []
+
+    shared_speaker = _resolve_shared_speaker()
 
     print("Preloading stimulus resources...")
     for item in animate_pool + inanimate_pool:
@@ -519,18 +637,111 @@ def preload_stimulus_resources():
 
         # Pre-instantiate Sound object — eliminates blocking init at trial start
         try:
-            snd_obj = sound.Sound(snd_path, stereo=True, preBuffer=-1)
+            sound_kwargs = dict(stereo=True, hamming=True, preBuffer=-1)
+            if shared_speaker is not None:
+                sound_kwargs['speaker'] = shared_speaker
+            snd_obj = sound.Sound(snd_path, **sound_kwargs)
             sound_stim_cache[item_name] = snd_obj
-            print(f"  [AUDIO] Preloaded {item_name}")
         except Exception as e:
-            print(f"  WARNING: sound preload failed {item_name} ({snd_path}): {e}")
+            import traceback as _tb
+            print(f"  WARNING: sound preload failed {item_name} ({snd_path}): {type(e).__name__}: {e}")
+            if os.environ.get('AV_STUDY_DEBUG_AUDIO', '0') == '1':
+                _tb.print_exc()
             sound_stim_cache[item_name] = None
+            failed_sound_items.append(item_name)
 
-    print("Stimulus preload complete.\n")
+    print("Stimulus preload complete.")
+    print(f"  Audio preload failures: {len(failed_sound_items)}")
+    if failed_sound_items:
+        preview = ', '.join(failed_sound_items[:5])
+        print(f"  Failed items (sample): {preview}")
+    print("")
+    if len(failed_sound_items) > MAX_AUDIO_PRELOAD_FAILURES:
+        raise RuntimeError(
+            f"Audio preload failed for {len(failed_sound_items)} items. "
+            "Fix backend/device and rerun."
+        )
     return image_cache, sound_path_cache, sound_stim_cache
 
 
 IMAGE_STIM_CACHE, SOUND_PATH_CACHE, SOUND_STIM_CACHE = preload_stimulus_resources()
+
+
+def print_audio_runtime_summary():
+    print("Audio runtime config:")
+    print(f"  Requested audioLib order: {audio_lib_order}")
+    print(f"  Requested latency mode: {audio_latency_mode}")
+    print(f"  Requested device: {audio_device_name}")
+    print(f"  Requested speaker: {audio_speaker_name}")
+    active_lib = getattr(sound, 'audioLib', None)
+    if active_lib is not None:
+        print(f"  PsychoPy selected backend: {active_lib}")
+    print(f"  Canonical audio format: {CANONICAL_AUDIO_HZ} Hz, {CANONICAL_AUDIO_CHANNELS} ch, {CANONICAL_AUDIO_SAMPLE_WIDTH_BYTES * 8}-bit")
+    print(f"  Max preload failures before abort: {MAX_AUDIO_PRELOAD_FAILURES}")
+    print(f"  Max runtime failures before abort: {MAX_AUDIO_RUNTIME_FAILURES}")
+
+
+def run_audio_preflight():
+    if SKIP_AUDIO_PREFLIGHT:
+        print("WARNING: skipping audio preflight (AV_STUDY_SKIP_AUDIO_PREFLIGHT=1)")
+        return
+
+    print("\nAudio preflight: playing short calibration tone.")
+    try:
+        tone_kwargs = dict(value=440, secs=0.25, stereo=True, hamming=True)
+        if SHARED_SPEAKER is not None:
+            tone_kwargs['speaker'] = SHARED_SPEAKER
+        tone = sound.Sound(**tone_kwargs)
+        tone.play()
+        core.wait(0.35)
+        tone.stop()
+    except Exception as e:
+        raise RuntimeError(f"Audio preflight playback failed: {e}")
+
+    prompt = visual.TextStim(
+        win,
+        text=(
+            "Audio check:\\n\\n"
+            "Did you hear the calibration tone?\\n\\n"
+            "Press Y = yes, N = no, ESC = quit."
+        ),
+        height=32,
+        wrapWidth=1300,
+        color='white',
+    )
+    prompt.draw()
+    win.flip()
+    resp = event.waitKeys(keyList=['y', 'n', 'escape'])
+    choice = resp[0] if resp else 'n'
+    if choice == 'escape':
+        win.close()
+        core.quit()
+    if choice != 'y':
+        raise RuntimeError(
+            "Audio preflight failed: operator did not hear calibration tone. "
+            "Check PipeWire sink selection and AV_STUDY_AUDIO_DEVICE."
+        )
+    print("Audio preflight passed.\n")
+
+
+def write_audio_preflight_status(passed):
+    status_path = os.path.join(data_dir, f"participant_{participant_pid}_audio_preflight.txt")
+    with open(status_path, 'w', encoding='utf-8') as f:
+        f.write(f"audio_preflight_passed={bool(passed)}\n")
+        f.write(f"audio_lib_order={audio_lib_order}\n")
+        f.write(f"audio_device={audio_device_name}\n")
+        f.write(f"audio_speaker={audio_speaker_name}\n")
+        f.write(f"audio_latency_mode={audio_latency_mode}\n")
+    print(f"Audio preflight status saved: {status_path}")
+
+
+print_audio_runtime_summary()
+_audio_preflight_passed = False
+try:
+    run_audio_preflight()
+    _audio_preflight_passed = True
+finally:
+    write_audio_preflight_status(_audio_preflight_passed)
 
 
 # ==============================================================================
@@ -1354,6 +1565,7 @@ def show_debug_screen(pt_group, pd_group_animate, npd_pool_animate,
 # ==============================================================================
 
 def run_trial(trial_num, block_type, active_pt_name, pt_group, pd_group, npd_pool, is_practice=False):
+    global AUDIO_RUNTIME_FAILURES
     appearances          = build_trial_appearances(block_type, pt_group, pd_group, npd_pool, active_pt_name)
     timeline, actual_content_end = build_timeline(appearances, block_type)
     is_valid, _          = validate_timeline(timeline)
@@ -1422,6 +1634,7 @@ def run_trial(trial_num, block_type, active_pt_name, pt_group, pd_group, npd_poo
 
         next_flip_trial = win.getFutureFlipTime(clock=trial_clock)
         next_flip_ptb = win.getFutureFlipTime(clock='ptb')
+        ptb_offset = next_flip_ptb - next_flip_trial
         frame_sample_t = next_flip_trial + HALF_FRAME_SEC
 
         frame_visual_onsets = []
@@ -1440,24 +1653,43 @@ def run_trial(trial_num, block_type, active_pt_name, pt_group, pd_group, npd_poo
                 ev['sound_stopped'] = True
 
             if (ev['scheduled_start_snd'] is not None and ev['aud_stim'] is not None
-                    and not ev['sound_played']
-                    and next_flip_trial >= ev['scheduled_start_snd'] - HALF_FRAME_SEC):
-                try:
-                    # sounddevice backend does not support when= — call play() directly.
-                    # PTB's when= scheduling is not available here; post-flip latency
-                    # is ~0.5–1 frame (8ms at 60Hz) which is acceptable on this hardware.
-                    ev['aud_stim'].play()
-                    ev['sound_played'] = True
-                    frame_sound_onsets.append((ev, next_flip_trial, True))
-                except Exception as e:
-                    print(f"  ERROR playing sound: {e}")
-                    ev['sound_played'] = True
-                    ev['sound_failed'] = True
-                    ev['start_snd'] = None
-                    ev['end_snd'] = None
-                    ev['sound_start_source'] = 'failed'
-                    ev['sound_is_playing'] = False
-                    ev['sound_stopped'] = True
+                    and not ev['sound_played']):
+                target_trial = ev['scheduled_start_snd']
+                lead_remaining = target_trial - next_flip_trial
+
+                if PTB_PREFLIGHT_SUPPORTED and lead_remaining <= PTB_PREFLIGHT_LEAD_SEC \
+                        and lead_remaining > HALF_FRAME_SEC:
+                    target_ptb = target_trial + ptb_offset
+                    try:
+                        ev['aud_stim'].play(when=target_ptb)
+                        ev['sound_played'] = True
+                        ev['scheduled_ptb_target'] = target_ptb
+                        frame_sound_onsets.append((ev, target_trial, 'ptb_preflight'))
+                    except Exception as e:
+                        print(f"  WARNING: PTB preflight play(when=) failed for "
+                              f"{ev['friendly_name']}: {e}; will retry immediate play().")
+
+                elif next_flip_trial >= target_trial - HALF_FRAME_SEC:
+                    try:
+                        ev['aud_stim'].play()
+                        ev['sound_played'] = True
+                        source = 'ptb_postflip' if PTB_PREFLIGHT_SUPPORTED else 'sounddevice_postflip'
+                        frame_sound_onsets.append((ev, next_flip_trial, source))
+                    except Exception as e:
+                        print(f"  ERROR playing sound: {e}")
+                        AUDIO_RUNTIME_FAILURES += 1
+                        ev['sound_played'] = True
+                        ev['sound_failed'] = True
+                        ev['start_snd'] = None
+                        ev['end_snd'] = None
+                        ev['sound_start_source'] = 'failed'
+                        ev['sound_is_playing'] = False
+                        ev['sound_stopped'] = True
+                        if AUDIO_RUNTIME_FAILURES > MAX_AUDIO_RUNTIME_FAILURES:
+                            raise RuntimeError(
+                                f"Audio runtime failure threshold exceeded "
+                                f"({AUDIO_RUNTIME_FAILURES} failures)."
+                            )
 
             if not ev['visual_started']:
                 visual_start = ev['scheduled_start_vis']
@@ -1498,16 +1730,18 @@ def run_trial(trial_num, block_type, active_pt_name, pt_group, pd_group, npd_poo
             if ev['role'] in ('PT', 'NPT'):
                 ev['response_window_end'] = ev['start_vis'] + RESPONSE_WINDOW
 
-        for ev, requested_sound_time, needs_postflip_play in frame_sound_onsets:
-            if needs_postflip_play:
-                # sounddevice: play() already called in scheduling block above;
-                # log the actual post-flip time as the onset timestamp.
-                start_snd = trial_clock.getTime()
-                ev['sound_start_source'] = 'sounddevice_postflip'
-            else:
+        for ev, requested_sound_time, source in frame_sound_onsets:
+            if source == 'ptb_preflight':
                 start_snd = requested_sound_time
-                ev['sound_start_source'] = 'ptb_preflight'
-            ev['requested_start_snd'] = requested_sound_time if requested_sound_time is not None else start_snd
+            elif source in ('sounddevice_postflip', 'ptb_postflip'):
+                start_snd = trial_clock.getTime()
+            else:
+                start_snd = trial_clock.getTime()
+                source = 'unknown_postflip'
+            ev['sound_start_source'] = source
+            ev['requested_start_snd'] = (
+                requested_sound_time if requested_sound_time is not None else start_snd
+            )
             ev['start_snd'] = start_snd
             ev['end_snd'] = start_snd + SOUND_DUR
             ev['sound_is_playing'] = True

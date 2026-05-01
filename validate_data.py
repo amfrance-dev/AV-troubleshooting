@@ -6,11 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-DEFAULT_STUDY_DIR = Path(r"Z:\Experiments\Anthony\AV_Spatiotemporal_Study")
-if not DEFAULT_STUDY_DIR.exists():
-    DEFAULT_STUDY_DIR = Path(r"C:\Users\Canine\Downloads\AV_Spatiotemporal_Study")
-if not DEFAULT_STUDY_DIR.exists():
-    DEFAULT_STUDY_DIR = Path(__file__).resolve().parent
+DEFAULT_STUDY_DIR = Path(os.environ.get("AV_STUDY_DIR", Path(__file__).resolve().parent))
 
 DATA_DIR = DEFAULT_STUDY_DIR / "data"
 
@@ -151,6 +147,7 @@ REQUIRED_TRIALS = {
     "n_pt_appearances", "n_npt_appearances", "n_pd_appearances", "n_npd_appearances",
     "total_appearances", "trial_duration_sec", "n_hits", "n_false_alarms",
 }
+FALLBACK_SOUND_SOURCES = {"fallback_postflip", "sounddevice_postflip", "ptb_postflip"}
 
 
 def parse_args():
@@ -175,6 +172,12 @@ def parse_args():
     parser.add_argument("--design-trials-per-block", type=int, default=None, help="Expected number of real trials per block.")
     parser.add_argument("--design-pt-trials", type=int, default=None, help="Expected number of real trials per PT.")
     parser.add_argument(
+        "--acceptance-profile",
+        choices=["none", "linux_pipewire_120"],
+        default="none",
+        help="Apply preset validator thresholds for a known runtime profile.",
+    )
+    parser.add_argument(
         "--write-report",
         dest="write_report",
         action="store_true",
@@ -188,6 +191,16 @@ def parse_args():
         help="Skip writing the validation report text file.",
     )
     return parser.parse_args()
+
+
+def apply_acceptance_profile(args):
+    if args.acceptance_profile == "linux_pipewire_120":
+        args.refresh_hz = 120.0
+        args.warn_visual_onset_frames = 1.0
+        args.error_visual_onset_frames = 2.0
+        args.warn_sound_onset_frames = 1.0
+        args.error_sound_onset_frames = 2.5
+    return args
 
 
 def pick_participant_dir(data_dir, participant_arg):
@@ -430,7 +443,7 @@ def validate_rows(stim_rows, resp_rows, trial_rows, args):
                                 f"{row.get('appearance_id')} stores sound_onset_error_ms={sound_onset_error_ms:.3f} but computed drift is {computed_sound_error_ms:.3f} ms.",
                                 key,
                             )
-                        if sound_start_source == "fallback_postflip":
+                        if sound_start_source in FALLBACK_SOUND_SOURCES:
                             drift_ms = sound_onset_error_ms if sound_onset_error_ms is not None else computed_sound_error_ms
                             abs_drift_ms = abs(drift_ms)
                             if abs_drift_ms > error_sound_onset_error_ms:
@@ -486,7 +499,7 @@ def validate_rows(stim_rows, resp_rows, trial_rows, args):
                                 key,
                             )
 
-                    if sound_start_source == "fallback_postflip":
+                    if sound_start_source in FALLBACK_SOUND_SOURCES:
                         fallback_sound_rows.append((key, row.get("appearance_id")))
 
             if response_time is not None and rt_from_fade_in is not None:
@@ -786,7 +799,7 @@ def write_report(participant_dir, report_text):
 
 
 def main():
-    args = parse_args()
+    args = apply_acceptance_profile(parse_args())
     participant_dir = pick_participant_dir(args.data_dir, args.participant)
     pid = participant_dir.name
 

@@ -31,6 +31,24 @@ This branch intentionally excludes legacy scripts, installers, and old analysis 
 3. Run `av_spatiotemporal_study.py` from PsychoPy or with Python in the study directory.
 4. Collect outputs from `data/<participant_pid>/`.
 
+### Linux (PipeWire + Xorg) quick setup
+
+For timing-critical sessions on Linux:
+
+1. Log into an Xorg session.
+2. Verify your intended output sink is active and not HDMI by mistake.
+3. Run with explicit audio overrides when needed:
+   - `AV_STUDY_AUDIO_LIBS=ptb,sounddevice,pygame`
+   - `AV_STUDY_AUDIO_DEVICE=default`
+   - `AV_STUDY_AUDIO_LATENCY_MODE=2`
+4. Start the study and pass the startup audio preflight tone gate.
+
+Useful runtime overrides:
+
+- `AV_STUDY_DIR=/path/to/study_root` to force the working directory.
+- `AV_STUDY_STRICT_XORG=1` to fail hard on Wayland.
+- `AV_STUDY_SKIP_AUDIO_PREFLIGHT=1` only for non-collection smoke tests.
+
 ## Timing Note
 
 `av_spatiotemporal_study.py` currently includes a `DEBUG_OVERLAY` setting. Leave it on for layout checks, but turn it off before production-style timing runs if you want the cleanest frame-timing numbers.

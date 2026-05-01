@@ -736,6 +736,31 @@ python av_spatiotemporal_study.py
 
 If you normally use PsychoPy's runner instead of plain Python, that is fine too, as long as it runs the same file.
 
+### Linux reliability checklist (PipeWire + Xorg)
+
+Before each data-collection session:
+
+1. Confirm Xorg session (recommended for timing-critical runs).
+2. Confirm your output sink is the intended headphones/speakers.
+3. Keep system audio sample rate on a stable 48 kHz path where possible.
+4. Launch with explicit overrides if needed:
+
+```bash
+AV_STUDY_AUDIO_LIBS=ptb,sounddevice,pygame \
+AV_STUDY_AUDIO_DEVICE=default \
+AV_STUDY_AUDIO_LATENCY_MODE=2 \
+python av_spatiotemporal_study.py
+```
+
+5. Pass the startup tone preflight. If the tone is not heard, stop and fix audio routing first.
+
+### If audio fails at startup
+
+- Confirm the selected sink is not muted and has output volume.
+- Re-run with a pinned device via `AV_STUDY_AUDIO_DEVICE=<device_name>`.
+- Try backend order `AV_STUDY_AUDIO_LIBS=sounddevice,ptb,pygame`.
+- Only for smoke tests (not production data), bypass preflight with `AV_STUDY_SKIP_AUDIO_PREFLIGHT=1`.
+
 
 ## 13. How To Run the Validator
 
@@ -758,6 +783,20 @@ If you want to check whether your final study design was followed, you can also 
 ```powershell
 python validate_data.py --design-trials-per-block 30 --design-pt-trials 15
 ```
+
+For Linux timing acceptance checks, run with explicit thresholds:
+
+```bash
+python validate_data.py --refresh-hz 120 \
+  --warn-visual-onset-frames 1.0 --error-visual-onset-frames 2.0 \
+  --warn-sound-onset-frames 1.0 --error-sound-onset-frames 2.5
+```
+
+Recommended acceptance target before freezing a Linux profile:
+
+- 0 validator `ERROR`s across at least 3 consecutive runs
+- no persistent `fallback_postflip` warning trend
+- no repeated long-frame spikes tied to audio events
 
 
 ## 14. How To Run a Guided Debug Session
